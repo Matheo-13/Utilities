@@ -8,19 +8,29 @@ from tkinter import filedialog, messagebox
 import hashlib
 from datetime import datetime
 import stat
+import re
+import win32com.client
+import pythoncom
 
 
-def compute_sha256(path):
+def compute_sha256(path, chunk_size=1024*1024):
     h = hashlib.sha256()
     with open(path, 'rb') as f:
-        while chunk := f.read(8192):
+        while chunk := f.read(chunk_size):
             h.update(chunk)
     return h.hexdigest()
 
-def compute_md5(path):
+def compute_sha512(path, chunk_size=1024*1024):
+    h = hashlib.sha512()
+    with open(path, 'rb') as f:
+        while chunk := f.read(chunk_size):
+            h.update(chunk)
+    return h.hexdigest()
+
+def compute_md5(path, chunk_size=1024*1024):
     h = hashlib.md5()
     with open(path, 'rb') as f:
-        while chunk := f.read(8192):
+        while chunk := f.read(chunk_size):
             h.update(chunk)
     return h.digest()
 
@@ -68,6 +78,39 @@ def remove_empty_folders(folder):
                 # Directory not empty or error, skip
                 pass
 
+def remove_unicode_controls(s):
+    # Remove common Unicode control chars like LRM, RLM etc.
+    # Here we remove characters in the range U+200E (LRM), U+200F (RLM), and others.
+    return re.sub(r'[\u200e\u200f]', '', s)
+
+def get_windows_date_taken(filepath):
+    try:
+        pythoncom.CoInitialize()
+        shell = win32com.client.Dispatch("Shell.Application")
+        folder_path = os.path.dirname(os.path.abspath(filepath))
+        filename = os.path.basename(filepath)
+        namespace = shell.NameSpace(folder_path)
+        if not namespace:
+            raise ValueError(f"Shell.Namespace returned None for folder: {filepath}")
+        item = namespace.ParseName(filename)
+        if not item:
+            raise ValueError(f"Shell.ParseName returned None for file: {filename}")
+
+        date_taken_str = namespace.GetDetailsOf(item, 12)
+        date_taken_str = remove_unicode_controls(date_taken_str)
+        if date_taken_str:
+            # Convert string like '7/2/2025 10:15:00 AM' to datetime
+            date_taken = datetime.strptime(date_taken_str, '%m/%d/%Y %I:%M %p')
+            return date_taken
+        else :
+            timestamp = os.path.getmtime(filepath)
+            dt = datetime.fromtimestamp(timestamp)
+            return dt
+    except Exception as e:
+        print(f"Error getting Windows Date Taken: {e}")
+        timestamp = os.path.getmtime(filepath)
+        dt = datetime.fromtimestamp(timestamp)
+        return dt
 
 class FileManagerApp:
     def __init__(self, root):
@@ -130,7 +173,7 @@ class DuplicateWindow:
         thread = threading.Thread(target=self.remove_duplicates, args=(self.folder,))
         thread.start()
 
-    def remove_duplicates(self, folder, file_hash : callable = compute_sha256):
+    def remove_duplicates(self, folder, file_hash : callable = compute_sha512):
         self.duplicate_progress['value'] = 0
         self.duplicate_progress.config(bootstyle="info-striped")
         total = count_files_recursive(folder)
@@ -192,7 +235,7 @@ class CopyWindow:
         self._src_is_done = False
         self._dst_is_done = False
 
-        self.hash_alg = compute_sha256 
+        self.hash_alg = compute_sha512
 
         self.frame = ttk.Frame(self.window, padding=20)
         self.frame.pack(expand=True, fill=BOTH)
@@ -240,7 +283,7 @@ class CopyWindow:
         thread = threading.Thread(target=self.copy_files_with_progress)
         thread.start()
 
-    def start_hashing(self, folder, progress_bar, is_src=True, file_hash : callable = compute_sha256):
+    def start_hashing(self, folder, progress_bar, is_src=True, file_hash : callable = compute_sha512):
         if is_src:
             self.src_progress.config(bootstyle="info-striped")
             self._src_is_done = False
@@ -390,8 +433,7 @@ class RenameWindow:
                 src_path = os.path.join(root, file)
             
                 # Get file modification time
-                timestamp = os.path.getmtime(src_path)
-                dt = datetime.fromtimestamp(timestamp)
+                dt = get_windows_date_taken(src_path)
 
                 # Build destination folder path: YYYY/MM
                 year_folder = dt.strftime("%Y")
